@@ -1,0 +1,72 @@
+name: EVERNIGHT Network Audit
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  static-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Refuse to analyze private server data in a public repository
+        env:
+          REPO_VISIBILITY: ${{ github.event.repository.private }}
+        run: |
+          if [ "$REPO_VISIBILITY" != "true" ]; then
+            echo "::error::Сначала переведите репозиторий в Private (Settings > General > Danger Zone)."
+            exit 1
+          fi
+
+      - name: Checkout audit scripts
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install audit dependencies
+        run: python -m pip install --disable-pip-version-check 'PyYAML==6.0.2'
+
+      - name: Download private release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p input
+          gh release download audit-input --dir input --pattern '*.zip' --pattern '*.rar'
+          find input -maxdepth 1 -type f -printf '%f\n'
+
+      - name: Extract server archive
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y p7zip-full unrar-free
+          mkdir -p server
+          count=$(find input -maxdepth 1 -type f \( -iname '*.zip' -o -iname '*.rar' \) | wc -l)
+          if [ "$count" -ne 1 ]; then
+            echo "::error::Release audit-input must contain exactly one ZIP or RAR server archive"
+            exit 1
+          fi
+          file=$(find input -maxdepth 1 -type f \( -iname '*.zip' -o -iname '*.rar' \) -print -quit)
+          7z x -y -bd -o"server" "$file" > /dev/null
+          rm -rf input
+          echo "Archive extracted to isolated audit directory"
+
+      - name: Static plugin audit
+        run: python tools/audit.py server report
+
+      - name: Publish sanitized summary
+        if: always()
+        run: |
+          if [ -f report/AUDIT.md ]; then
+            cat report/AUDIT.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload sanitized audit only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: evernight-audit-report
+          path: report/
+          if-no-files-found: ignore
+          retention-days: 7
